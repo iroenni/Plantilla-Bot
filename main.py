@@ -10,7 +10,7 @@ app = Client(
     "bot",
     api_id=14681595,
     api_hash="a86730aab5c59953c424abb4396d32d5",
-    bot_token="8138537409:AAHGgzcTdoKEPQlMhbfjAVJuWkX8-M7s_wo"
+    bot_token="8138537409:AAGMLe6R1nk8wHmfE2AZVSdG4_AQ8aaISSA"
 )
 
 # Variable para controlar el envío automático
