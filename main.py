@@ -1,324 +1,969 @@
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import datetime
-import random
 import asyncio
-import time
-
-# Conectar bot con el cliente
-app = Client(
-    "bot",
-    api_id=14681595,
-    api_hash="a86730aab5c59953c424abb4396d32d5",
-    bot_token="8138537409:AAGMLe6R1nk8wHmfE2AZVSdG4_AQ8aaISSA"
+import datetime
+import logging
+from typing import Dict, List
+import aiosqlite
+import aiohttp
+import pytz
+from pyrogram import Client, filters
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    Message
 )
+from pyrogram.enums import ParseMode
 
-# Variable para controlar el envío automático
-auto_messages_active = True
-# Reemplaza con tu ID de usuario (puedes obtenerlo con /id)
-YOUR_USER_ID = 7970466590  # Cambia esto por tu ID real
+# Configuración básica
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Lista de mensajes automáticos
-AUTO_MESSAGES = [
-    "🤖 **Recordatorio automático**\n¡El bot sigue activo y funcionando!",
-    "⏰ **Mensaje programado**\nTodo funciona correctamente",
-    "🔔 **Notificación**\nEl bot está online y listo para ayudarte",
-    "💫 **Actualización**\nTodas las funciones están operativas",
-    "📊 **Reporte**\nEstado: ✅ Todo en orden"
-]
+# Configuración del bot
+API_ID = 14681595
+API_HASH = "a86730aab5c59953c424abb4396d32d5"
+BOT_TOKEN = "8138537409:AAGMLe6R1nk8wHmfE2AZVSdG4_AQ8aaISSA"
+OWNER_ID = 7970466590  # Tu ID de usuario
 
-async def send_auto_messages():
-    """Función para enviar mensajes automáticos cada cierto tiempo"""
-    while auto_messages_active:
-        try:
-            # Esperar 30 minutos (1800 segundos)
-            await asyncio.sleep(1800)
+# Inicializar cliente
+app = Client("monitoring_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Base de datos
+DB_NAME = "monitoring.db"
+
+# Estados de monitoreo
+MONITORING_JOBS = {}
+MONITORING_TASKS = {}
+
+class Database:
+    """Clase para manejar la base de datos SQLite"""
+    
+    @staticmethod
+    async def init_db():
+        """Inicializar la base de datos"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Tabla de sitios web
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS websites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    interval INTEGER DEFAULT 60,
+                    status TEXT DEFAULT 'unknown',
+                    last_check DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    enabled INTEGER DEFAULT 1
+                )
+            ''')
             
-            if auto_messages_active:
-                # Seleccionar mensaje aleatorio
-                message = random.choice(AUTO_MESSAGES)
-                current_time = datetime.datetime.now().strftime("%H:%M:%S")
-                full_message = f"{message}\n\n🕐 **Hora:** {current_time}"
+            # Tabla de historial de checks
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS checks_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    website_id INTEGER NOT NULL,
+                    status_code INTEGER,
+                    response_time REAL,
+                    is_up INTEGER DEFAULT 0,
+                    error_message TEXT,
+                    checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (website_id) REFERENCES websites (id)
+                )
+            ''')
+            
+            # Tabla de notificaciones
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    website_id INTEGER,
+                    notification_type TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Tabla de usuarios
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    language_code TEXT DEFAULT 'es',
+                    notifications_enabled INTEGER DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            await db.commit()
+            logger.info("Base de datos inicializada")
+
+    @staticmethod
+    async def add_user(user_id: int, username: str, first_name: str, last_name: str = None):
+        """Agregar usuario a la base de datos"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                '''INSERT OR IGNORE INTO users 
+                   (user_id, username, first_name, last_name) 
+                   VALUES (?, ?, ?, ?)''',
+                (user_id, username, first_name, last_name)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def add_website(user_id: int, name: str, url: str, interval: int = 60):
+        """Agregar sitio web para monitoreo"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            cursor = await db.execute(
+                '''INSERT INTO websites (name, url, user_id, interval) 
+                   VALUES (?, ?, ?, ?)''',
+                (name, url, user_id, interval)
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    @staticmethod
+    async def get_websites(user_id: int = None):
+        """Obtener todos los sitios web o de un usuario específico"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            if user_id:
+                cursor = await db.execute(
+                    '''SELECT * FROM websites WHERE user_id = ? ORDER BY created_at DESC''',
+                    (user_id,)
+                )
+            else:
+                cursor = await db.execute('''SELECT * FROM websites ORDER BY created_at DESC''')
+            
+            columns = [description[0] for description in cursor.description]
+            websites = await cursor.fetchall()
+            return [dict(zip(columns, website)) for website in websites]
+
+    @staticmethod
+    async def get_website(website_id: int):
+        """Obtener un sitio web por ID"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            cursor = await db.execute(
+                '''SELECT * FROM websites WHERE id = ?''',
+                (website_id,)
+            )
+            website = await cursor.fetchone()
+            if website:
+                columns = [description[0] for description in cursor.description]
+                return dict(zip(columns, website))
+            return None
+
+    @staticmethod
+    async def update_website_status(website_id: int, status: str, last_check: datetime):
+        """Actualizar estado del sitio web"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                '''UPDATE websites SET status = ?, last_check = ? WHERE id = ?''',
+                (status, last_check, website_id)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def add_check_history(website_id: int, status_code: int, response_time: float, is_up: bool, error_message: str = None):
+        """Agregar historial de check"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                '''INSERT INTO checks_history 
+                   (website_id, status_code, response_time, is_up, error_message) 
+                   VALUES (?, ?, ?, ?, ?)''',
+                (website_id, status_code, response_time, is_up, error_message)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def get_website_stats(website_id: int):
+        """Obtener estadísticas del sitio web"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Obtener uptime de las últimas 24 horas
+            cursor = await db.execute('''
+                SELECT 
+                    COUNT(*) as total_checks,
+                    SUM(CASE WHEN is_up = 1 THEN 1 ELSE 0 END) as successful_checks,
+                    AVG(response_time) as avg_response_time
+                FROM checks_history 
+                WHERE website_id = ? AND checked_at > datetime('now', '-24 hours')
+            ''', (website_id,))
+            stats = await cursor.fetchone()
+            
+            if stats and stats[0] > 0:
+                uptime = (stats[1] / stats[0]) * 100
+                return {
+                    'total_checks': stats[0],
+                    'successful_checks': stats[1],
+                    'uptime_24h': round(uptime, 2),
+                    'avg_response_time': round(stats[2] or 0, 2)
+                }
+            return None
+
+    @staticmethod
+    async def delete_website(website_id: int):
+        """Eliminar sitio web"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute('''DELETE FROM websites WHERE id = ?''', (website_id,))
+            await db.commit()
+            return True
+
+    @staticmethod
+    async def toggle_website(website_id: int, enabled: bool):
+        """Activar/desactivar sitio web"""
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                '''UPDATE websites SET enabled = ? WHERE id = ?''',
+                (1 if enabled else 0, website_id)
+            )
+            await db.commit()
+
+class WebsiteMonitor:
+    """Clase para monitorear sitios web"""
+    
+    def __init__(self):
+        self.session = None
+        
+    async def get_session(self):
+        """Obtener sesión aiohttp"""
+        if self.session is None:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
+        return self.session
+        
+    async def check_website(self, website: Dict) -> Dict:
+        """Verificar un sitio web"""
+        session = await self.get_session()
+        start_time = datetime.datetime.now()
+        
+        try:
+            async with session.get(
+                website['url'],
+                allow_redirects=True,
+                ssl=False
+            ) as response:
+                response_time = (datetime.datetime.now() - start_time).total_seconds()
                 
-                # Enviar mensaje al usuario
-                await app.send_message(YOUR_USER_ID, full_message)
-                print(f"📨 Mensaje automático enviado a {YOUR_USER_ID}")
+                is_up = response.status < 400
+                status = "up" if is_up else "down"
+                
+                return {
+                    'status': status,
+                    'status_code': response.status,
+                    'response_time': response_time,
+                    'is_up': is_up,
+                    'error_message': None
+                }
                 
         except Exception as e:
-            print(f"❌ Error enviando mensaje automático: {e}")
-
-# Comando para activar/desactivar mensajes automáticos
-@app.on_message(filters.command("auto"))
-def auto_command(client, message):
-    global auto_messages_active
+            response_time = (datetime.datetime.now() - start_time).total_seconds()
+            return {
+                'status': 'down',
+                'status_code': 0,
+                'response_time': response_time,
+                'is_up': False,
+                'error_message': str(e)
+            }
     
-    if message.from_user.id != YOUR_USER_ID:
-        message.reply("❌ **Solo el dueño puede usar este comando**")
-        return
+    async def check_all_websites(self):
+        """Verificar todos los sitios web activos"""
+        websites = await Database.get_websites()
+        active_websites = [w for w in websites if w['enabled'] == 1]
+        
+        for website in active_websites:
+            try:
+                result = await self.check_website(website)
+                now = datetime.datetime.now()
+                
+                # Actualizar base de datos
+                await Database.update_website_status(website['id'], result['status'], now)
+                await Database.add_check_history(
+                    website['id'],
+                    result['status_code'],
+                    result['response_time'],
+                    result['is_up'],
+                    result['error_message']
+                )
+                
+                # Enviar notificación si el estado cambió
+                if website['status'] != result['status']:
+                    await self.send_status_notification(website, result)
+                    
+            except Exception as e:
+                logger.error(f"Error checking website {website['url']}: {e}")
     
-    if len(message.command) > 1:
-        action = message.command[1].lower()
-        if action in ["on", "activar", "start"]:
-            auto_messages_active = True
-            message.reply("✅ **Mensajes automáticos ACTIVADOS**\nSe enviarán cada 30 minutos")
-        elif action in ["off", "desactivar", "stop"]:
-            auto_messages_active = False
-            message.reply("❌ **Mensajes automáticos DESACTIVADOS**")
-        else:
-            message.reply("❌ **Uso:** `/auto on` o `/auto off`")
-    else:
-        status = "🟢 ACTIVADOS" if auto_messages_active else "🔴 DESACTIVADOS"
-        message.reply(f"**Estado de mensajes automáticos:** {status}")
+    async def send_status_notification(self, website: Dict, result: Dict):
+        """Enviar notificación de cambio de estado"""
+        user_id = website['user_id']
+        
+        status_emoji = "🟢" if result['is_up'] else "🔴"
+        status_text = "ONLINE" if result['is_up'] else "OFFLINE"
+        
+        message = (
+            f"🚨 **Cambio de Estado Detectado**\n\n"
+            f"**Sitio:** {website['name']}\n"
+            f"**URL:** {website['url']}\n"
+            f"**Estado:** {status_emoji} {status_text}\n"
+            f"**Código HTTP:** {result['status_code']}\n"
+            f"**Tiempo de respuesta:** {result['response_time']:.2f}s\n"
+        )
+        
+        if result['error_message']:
+            message += f"**Error:** {result['error_message']}\n"
+        
+        message += f"\n🕐 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        try:
+            await app.send_message(user_id, message)
+        except Exception as e:
+            logger.error(f"Error sending notification: {e}")
 
-# Comando para configurar el intervalo
-@app.on_message(filters.command("interval"))
-def interval_command(client, message):
-    if message.from_user.id != YOUR_USER_ID:
-        message.reply("❌ **Solo el dueño puede usar este comando**")
-        return
-    
-    message.reply("🕐 **Configuración de intervalo**\nActualmente fijo en 30 minutos\n*Próximamente: intervalo personalizable*")
+# Inicializar monitor
+monitor = WebsiteMonitor()
 
-# Comando /start
+# Comandos del bot
 @app.on_message(filters.command("start"))
-def start_command(client, message):
-    username = message.from_user.username
-    first_name = message.from_user.first_name
+async def start_command(client: Client, message: Message):
+    """Comando /start"""
+    user = message.from_user
+    await Database.add_user(user.id, user.username, user.first_name, user.last_name)
     
-    # Verificar si es el dueño
-    owner_buttons = []
-    if message.from_user.id == YOUR_USER_ID:
-        owner_buttons = [
-            [InlineKeyboardButton("🔔 Auto Mensajes", callback_data="auto_settings"),
-            InlineKeyboardButton("🕐 Intervalo", callback_data="interval_settings")]
-        ]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Agregar Sitio", callback_data="add_site"),
+         InlineKeyboardButton("📊 Mis Sitios", callback_data="list_sites")],
+        [InlineKeyboardButton("⚙️ Configuración", callback_data="settings"),
+         InlineKeyboardButton("📈 Estadísticas", callback_data="stats")],
+        [InlineKeyboardButton("ℹ️ Ayuda", callback_data="help"),
+         InlineKeyboardButton("👨‍💻 Soporte", url="https://t.me/tuusuario")]
+    ])
     
-    keyboard_buttons = [
-        [InlineKeyboardButton("📋 Comandos", callback_data="help"),
-         InlineKeyboardButton("ℹ️ Info", callback_data="info")],
-        [InlineKeyboardButton("🔗 Soporte", url="https://t.me/tuusuario")]
-    ]
+    welcome_text = (
+        f"👋 **Bienvenido {user.first_name}!**\n\n"
+        "🤖 **Bot de Monitoreo Web Uptime**\n"
+        "Monitorea el estado de tus sitios web 24/7\n\n"
+        "✨ **Características:**\n"
+        "• Monitoreo en tiempo real\n"
+        "• Notificaciones instantáneas\n"
+        "• Historial y estadísticas\n"
+        "• Panel de control interactivo\n\n"
+        "Usa los botones para comenzar!"
+    )
     
-    # Combinar botones
-    if owner_buttons:
-        keyboard_buttons = owner_buttons + keyboard_buttons
-    
-    keyboard = InlineKeyboardMarkup(keyboard_buttons)
-    
-    msg_start = f"""👋 **Bienvenido {first_name}** (@{username})
+    await message.reply_text(welcome_text, reply_markup=keyboard)
 
-🤖 **Bot Multifuncional**
-✨ Estoy aquí para ayudarte con diversas tareas.
-
-{"🔔 **Modo Dueño Activado**" if message.from_user.id == YOUR_USER_ID else ""}
-
-Usa /help para ver todos los comandos disponibles."""
+@app.on_message(filters.command("add"))
+async def add_site_command(client: Client, message: Message):
+    """Agregar sitio web para monitoreo"""
+    args = message.text.split()
     
-    message.reply(msg_start, reply_markup=keyboard)
+    if len(args) < 3:
+        await message.reply_text(
+            "📝 **Uso:** `/add <nombre> <url>`\n\n"
+            "**Ejemplo:**\n"
+            "`/add MiSitio https://ejemplo.com`\n"
+            "`/add API https://api.ejemplo.com/health`"
+        )
+        return
+    
+    name = args[1]
+    url = args[2] if args[2].startswith(('http://', 'https://')) else f'https://{args[2]}'
+    
+    # Validar URL básica
+    if not url.startswith(('http://', 'https://')):
+        await message.reply_text("❌ URL inválida. Debe comenzar con http:// o https://")
+        return
+    
+    try:
+        website_id = await Database.add_website(message.from_user.id, name, url)
+        
+        await message.reply_text(
+            f"✅ **Sitio agregado exitosamente!**\n\n"
+            f"**Nombre:** {name}\n"
+            f"**URL:** {url}\n"
+            f"**ID:** `{website_id}`\n\n"
+            "El monitoreo comenzará automáticamente en 1 minuto."
+        )
+        
+        # Iniciar monitoreo para este sitio
+        await start_monitoring_website(website_id)
+        
+    except Exception as e:
+        await message.reply_text(f"❌ Error al agregar sitio: {str(e)}")
 
-# Comando /help
+@app.on_message(filters.command("sites"))
+async def list_sites_command(client: Client, message: Message):
+    """Listar sitios web del usuario"""
+    websites = await Database.get_websites(message.from_user.id)
+    
+    if not websites:
+        await message.reply_text(
+            "📭 **No tienes sitios monitoreados**\n\n"
+            "Usa /add para agregar tu primer sitio web."
+        )
+        return
+    
+    text = "📊 **Tus Sitios Monitoreados:**\n\n"
+    
+    for site in websites:
+        status_emoji = {
+            'up': '🟢',
+            'down': '🔴',
+            'unknown': '⚫'
+        }.get(site['status'], '⚫')
+        
+        enabled_emoji = '✅' if site['enabled'] else '⏸️'
+        
+        text += (
+            f"{status_emoji} **{site['name']}** {enabled_emoji}\n"
+            f"🔗 {site['url']}\n"
+            f"🆔 ID: `{site['id']}` | ⏱️ {site['interval']}s\n"
+        )
+        
+        if site['last_check']:
+            last_check = datetime.datetime.fromisoformat(site['last_check'])
+            text += f"🕐 Última verificación: {last_check.strftime('%H:%M:%S')}\n"
+        
+        text += "─" * 30 + "\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Actualizar", callback_data="list_sites"),
+         InlineKeyboardButton("➕ Agregar Más", callback_data="add_site")],
+        [InlineKeyboardButton("📈 Ver Detalles", callback_data="view_details")]
+    ])
+    
+    await message.reply_text(text[:4000], reply_markup=keyboard)
+
+@app.on_message(filters.command("stats"))
+async def stats_command(client: Client, message: Message):
+    """Estadísticas generales"""
+    websites = await Database.get_websites(message.from_user.id)
+    
+    if not websites:
+        await message.reply_text("No tienes sitios monitoreados aún.")
+        return
+    
+    total_sites = len(websites)
+    up_sites = len([s for s in websites if s['status'] == 'up'])
+    down_sites = len([s for s in websites if s['status'] == 'down'])
+    enabled_sites = len([s for s in websites if s['enabled'] == 1])
+    
+    text = (
+        "📈 **Estadísticas de Monitoreo**\n\n"
+        f"**Sitios Totales:** {total_sites}\n"
+        f"**🟢 Online:** {up_sites}\n"
+        f"**🔴 Offline:** {down_sites}\n"
+        f"**✅ Activos:** {enabled_sites}\n"
+        f"**⏸️ Pausados:** {total_sites - enabled_sites}\n\n"
+    )
+    
+    # Calcular uptime general
+    total_uptime = 0
+    sites_with_stats = 0
+    
+    for site in websites:
+        stats = await Database.get_website_stats(site['id'])
+        if stats:
+            total_uptime += stats['uptime_24h']
+            sites_with_stats += 1
+    
+    if sites_with_stats > 0:
+        avg_uptime = total_uptime / sites_with_stats
+        text += f"**📊 Uptime promedio (24h):** {avg_uptime:.2f}%\n"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Actualizar", callback_data="stats"),
+         InlineKeyboardButton("📊 Detalles por Sitio", callback_data="site_stats")]
+    ])
+    
+    await message.reply_text(text, reply_markup=keyboard)
+
+@app.on_message(filters.command("check"))
+async def check_now_command(client: Client, message: Message):
+    """Forzar verificación de todos los sitios"""
+    await message.reply_text("🔄 Verificando todos los sitios...")
+    
+    try:
+        await monitor.check_all_websites()
+        await message.reply_text("✅ Verificación completada!")
+    except Exception as e:
+        await message.reply_text(f"❌ Error durante la verificación: {str(e)}")
+
+@app.on_message(filters.command("pause"))
+async def pause_command(client: Client, message: Message):
+    """Pausar monitoreo de un sitio"""
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.reply_text(
+            "⏸️ **Uso:** `/pause <id_del_sitio>`\n\n"
+            "Obtén el ID con el comando /sites"
+        )
+        return
+    
+    try:
+        site_id = int(args[1])
+        website = await Database.get_website(site_id)
+        
+        if not website:
+            await message.reply_text("❌ Sitio no encontrado.")
+            return
+        
+        if website['user_id'] != message.from_user.id:
+            await message.reply_text("❌ Solo puedes pausar tus propios sitios.")
+            return
+        
+        await Database.toggle_website(site_id, False)
+        await stop_monitoring_website(site_id)
+        
+        await message.reply_text(
+            f"⏸️ **Monitoreo pausado**\n\n"
+            f"**Sitio:** {website['name']}\n"
+            f"**ID:** {site_id}\n\n"
+            "Usa /resume para reactivar."
+        )
+        
+    except ValueError:
+        await message.reply_text("❌ ID inválido.")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {str(e)}")
+
+@app.on_message(filters.command("resume"))
+async def resume_command(client: Client, message: Message):
+    """Reanudar monitoreo de un sitio"""
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.reply_text(
+            "▶️ **Uso:** `/resume <id_del_sitio>`\n\n"
+            "Obtén el ID con el comando /sites"
+        )
+        return
+    
+    try:
+        site_id = int(args[1])
+        website = await Database.get_website(site_id)
+        
+        if not website:
+            await message.reply_text("❌ Sitio no encontrado.")
+            return
+        
+        if website['user_id'] != message.from_user.id:
+            await message.reply_text("❌ Solo puedes reanudar tus propios sitios.")
+            return
+        
+        await Database.toggle_website(site_id, True)
+        await start_monitoring_website(site_id)
+        
+        await message.reply_text(
+            f"▶️ **Monitoreo reanudado**\n\n"
+            f"**Sitio:** {website['name']}\n"
+            f"**ID:** {site_id}\n\n"
+            "El sitio será verificado en el próximo ciclo."
+        )
+        
+    except ValueError:
+        await message.reply_text("❌ ID inválido.")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {str(e)}")
+
+@app.on_message(filters.command("delete"))
+async def delete_command(client: Client, message: Message):
+    """Eliminar un sitio"""
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.reply_text(
+            "🗑️ **Uso:** `/delete <id_del_sitio>`\n\n"
+            "⚠️ **Esta acción no se puede deshacer!**"
+        )
+        return
+    
+    try:
+        site_id = int(args[1])
+        website = await Database.get_website(site_id)
+        
+        if not website:
+            await message.reply_text("❌ Sitio no encontrado.")
+            return
+        
+        if website['user_id'] != message.from_user.id:
+            await message.reply_text("❌ Solo puedes eliminar tus propios sitios.")
+            return
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Sí, eliminar", callback_data=f"confirm_delete_{site_id}"),
+             InlineKeyboardButton("❌ Cancelar", callback_data="cancel_delete")]
+        ])
+        
+        await message.reply_text(
+            f"⚠️ **¿Eliminar sitio?**\n\n"
+            f"**Nombre:** {website['name']}\n"
+            f"**URL:** {website['url']}\n"
+            f"**ID:** {site_id}\n\n"
+            "Esta acción eliminará todos los datos del sitio.",
+            reply_markup=keyboard
+        )
+        
+    except ValueError:
+        await message.reply_text("❌ ID inválido.")
+
+@app.on_message(filters.command("status"))
+async def status_command(client: Client, message: Message):
+    """Estado general del sistema"""
+    websites = await Database.get_websites()
+    
+    total_sites = len(websites)
+    up_sites = len([s for s in websites if s['status'] == 'up'])
+    down_sites = len([s for s in websites if s['status'] == 'down'])
+    
+    text = (
+        "🤖 **Estado del Sistema**\n\n"
+        f"**Bot:** 🟢 Online\n"
+        f"**Monitoreando:** {total_sites} sitios\n"
+        f"**🟢 Online:** {up_sites}\n"
+        f"**🔴 Offline:** {down_sites}\n"
+        f"**📊 Uptime general:** {(up_sites/total_sites*100 if total_sites > 0 else 0):.1f}%\n\n"
+        f"🕐 **Hora del servidor:** {datetime.datetime.now().strftime('%H:%M:%S')}\n"
+        f"📅 **Fecha:** {datetime.datetime.now().strftime('%Y-%m-%d')}"
+    )
+    
+    await message.reply_text(text)
+
 @app.on_message(filters.command("help"))
-def help_command(client, message):
-    help_text = """**📋 Lista de Comandos Disponibles:**
+async def help_command(client: Client, message: Message):
+    """Mostrar ayuda"""
+    help_text = """
+📚 **Comandos Disponibles:**
 
 **👤 Básicos:**
-/start - Iniciar el bot
-/help - Mostrar esta ayuda
-/info - Información del usuario
-/id - Obtener tu ID
-
-**🛠️ Utilidades:**
-/time - Hora actual
-/ping - Verificar latencia
-/echo [texto] - Repetir texto
-/stats - Estadísticas del bot
-
-**🎮 Entretenimiento:**
-/dado - Lanzar un dado
-/coin - Lanzar una moneda
-
-**🔔 Dueño:**
-/auto [on/off] - Activar/desactivar mensajes automáticos
-/interval - Configurar intervalo
-
-**✨ ¡Próximamente más funciones!**"""
-    
-    message.reply(help_text)
-
-# Comando /info
-@app.on_message(filters.command("info"))
-def info_command(client, message):
-    user = message.from_user
-    chat = message.chat
-    
-    info_text = f"""**👤 Información del Usuario:**
-
-**🆔 ID:** `{user.id}`
-**👤 Nombre:** {user.first_name}
-**📛 Apellido:** {user.last_name or 'No especificado'}
-**📧 Username:** @{user.username or 'No tiene'}
-**👥 Tipo de chat:** {chat.type}
-**📅 Usuario desde:** {user.date.strftime('%d/%m/%Y')}
-{"**👑 Rol:** Dueño del Bot" if user.id == YOUR_USER_ID else ""}"""
-    
-    message.reply(info_text)
-
-# Comando /id
-@app.on_message(filters.command("id"))
-def id_command(client, message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    message.reply(f"**🆔 Tus IDs:**\n**Usuario:** `{user_id}`\n**Chat:** `{chat_id}`")
-
-# Comando /time
-@app.on_message(filters.command("time"))
-def time_command(client, message):
-    current_time = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    message.reply(f"**🕐 Hora actual:**\n`{current_time}`")
-
-# Comando /ping
-@app.on_message(filters.command("ping"))
-def ping_command(client, message):
-    start_time = datetime.datetime.now()
-    msg = message.reply("🏓 **Pong!**")
-    end_time = datetime.datetime.now()
-    ping_time = (end_time - start_time).microseconds / 1000
-    
-    msg.edit(f"🏓 **Pong!**\n**⏱️ Latencia:** `{ping_time:.2f} ms`")
-
-# Comando /echo
-@app.on_message(filters.command("echo"))
-def echo_command(client, message):
-    if len(message.command) > 1:
-        text = " ".join(message.command[1:])
-        message.reply(f"**Eco:** {text}")
-    else:
-        message.reply("❌ **Uso:** `/echo [texto]`")
-
-# Comando /dado
-@app.on_message(filters.command("dado"))
-def dice_command(client, message):
-    dice_result = random.randint(1, 6)
-    message.reply(f"🎲 **Dado lanzado:** `{dice_result}`")
-
-# Comando /coin
-@app.on_message(filters.command("coin"))
-def coin_command(client, message):
-    result = random.choice(["🌕 Cara", "🌑 Cruz"])
-    message.reply(f"🪙 **Moneda lanzada:** `{result}`")
-
-# Comando /stats
-@app.on_message(filters.command("stats"))
-def stats_command(client, message):
-    auto_status = "🟢 Activados" if auto_messages_active else "🔴 Desactivados"
-    stats_text = f"""**📊 Estadísticas del Bot:**
-
-**🟢 Estado:** Online
-**⚙️ Funciones:** 10+ comandos
-**🔔 Auto Mensajes:** {auto_status}
-**📅 Última actualización:** Ahora
-**👨‍💻 Desarrollador:** Tu nombre
-**🔧 Framework:** Pyrogram"""
-    
-    message.reply(stats_text)
-
-# Manejar mensajes de texto que no son comandos
-@app.on_message(filters.private & filters.text)
-def handle_text_messages(client, message):
-    # Verificar manualmente si no es un comando
-    if message.text.startswith('/'):
-        return  # Ignorar comandos
-    
-    text = message.text.lower()
-    
-    # Respuestas automáticas
-    if "hola" in text or "hi" in text:
-        message.reply(f"👋 ¡Hola {message.from_user.first_name}! ¿En qué puedo ayudarte?")
-    
-    elif "gracias" in text:
-        message.reply("😊 ¡De nada! ¿Necesitas algo más?")
-    
-    elif "bot" in text:
-        message.reply("🤖 ¡Sí, soy un bot! Usa /help para ver lo que puedo hacer.")
-    
-    elif "adiós" in text or "chao" in text:
-        message.reply("👋 ¡Hasta luego! Fue un gusto ayudarte.")
-
-# Manejar callbacks de botones
-@app.on_callback_query()
-def handle_callbacks(client, callback_query):
-    data = callback_query.data
-    user = callback_query.from_user
-    
-    if data == "help":
-        help_text = """**📋 Comandos Disponibles:**
-
 /start - Iniciar bot
-/help - Ver comandos
-/info - Tu información
-/id - Tu ID
-/time - Hora actual
-/ping - Latencia
-/echo - Repetir texto
-/dado - Lanzar dado
-/coin - Lanzar moneda
-/stats - Estadísticas"""
-        
-        callback_query.edit_message_text(help_text)
+/help - Mostrar esta ayuda
+/status - Estado del sistema
+
+**🌐 Monitoreo:**
+/add <nombre> <url> - Agregar sitio
+/sites - Listar sitios
+/check - Verificar ahora
+/stats - Estadísticas
+
+**⚙️ Gestión:**
+/pause <id> - Pausar monitoreo
+/resume <id> - Reanudar monitoreo
+/delete <id> - Eliminar sitio
+/info <id> - Información del sitio
+
+**📊 Reportes:**
+/report - Reporte diario
+/history <id> - Historial del sitio
+
+**👑 Dueño:**
+/allstats - Estadísticas globales
+/broadcast <msg> - Mensaje a usuarios
+"""
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Agregar Sitio", callback_data="add_site"),
+         InlineKeyboardButton("📊 Mis Sitios", callback_data="list_sites")],
+        [InlineKeyboardButton("📈 Estadísticas", callback_data="stats"),
+         InlineKeyboardButton("⚙️ Configuración", callback_data="settings")]
+    ])
     
-    elif data == "info":
-        info_text = f"""**ℹ️ Información:**
+    await message.reply_text(help_text, reply_markup=keyboard)
 
-**🆔 ID:** `{user.id}`
-**👤 Nombre:** {user.first_name}
-**📛 Apellido:** {user.last_name or 'No especificado'}
-**📧 Username:** @{user.username or 'No tiene'}"""
-        
-        callback_query.edit_message_text(info_text)
+# Manejo de callbacks (botones)
+@app.on_callback_query()
+async def handle_callback(client: Client, callback_query: CallbackQuery):
+    """Manejar botones inline"""
+    data = callback_query.data
+    user_id = callback_query.from_user.id
     
-    elif data == "auto_settings" and user.id == YOUR_USER_ID:
-        status = "🟢 ACTIVADOS" if auto_messages_active else "🔴 DESACTIVADOS"
-        auto_text = f"""**🔔 Configuración de Auto Mensajes**
-
-**Estado:** {status}
-**Intervalo:** 30 minutos
-
-**Comandos:**
-/auto on - Activar
-/auto off - Desactivar
-/interval - Configurar tiempo"""
+    if data == "add_site":
+        await callback_query.message.reply_text(
+            "📝 **Agregar Nuevo Sitio**\n\n"
+            "Envía el comando:\n"
+            "`/add <nombre> <url>`\n\n"
+            "**Ejemplo:**\n"
+            "`/add MiSitio https://ejemplo.com`"
+        )
+        await callback_query.answer()
         
-        callback_query.edit_message_text(auto_text)
+    elif data == "list_sites":
+        websites = await Database.get_websites(user_id)
+        
+        if not websites:
+            await callback_query.message.edit_text(
+                "📭 **No tienes sitios monitoreados**\n\n"
+                "Usa el botón 'Agregar Sitio' para comenzar."
+            )
+            return
+        
+        text = "📊 **Tus Sitios Monitoreados:**\n\n"
+        buttons = []
+        
+        for site in websites[:10]:  # Máximo 10 por página
+            status_emoji = '🟢' if site['status'] == 'up' else '🔴'
+            enabled_emoji = '✅' if site['enabled'] else '⏸️'
+            
+            text += f"{status_emoji} **{site['name']}** {enabled_emoji}\n"
+            text += f"🔗 {site['url'][:30]}...\n"
+            text += f"🆔 ID: `{site['id']}`\n"
+            text += "─" * 30 + "\n"
+            
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{site['name']} ({site['id']})",
+                    callback_data=f"site_info_{site['id']}"
+                )
+            ])
+        
+        buttons.append([
+            InlineKeyboardButton("🔄 Actualizar", callback_data="list_sites"),
+            InlineKeyboardButton("➕ Agregar", callback_data="add_site")
+        ])
+        
+        keyboard = InlineKeyboardMarkup(buttons)
+        await callback_query.message.edit_text(text, reply_markup=keyboard)
+        await callback_query.answer()
     
-    elif data == "interval_settings" and user.id == YOUR_USER_ID:
-        callback_query.edit_message_text("🕐 **Configuración de Intervalo**\n\nActualmente el intervalo está fijo en 30 minutos.\n*En futuras actualizaciones podrás personalizarlo*")
+    elif data.startswith("site_info_"):
+        site_id = int(data.split("_")[2])
+        website = await Database.get_website(site_id)
+        
+        if not website or website['user_id'] != user_id:
+            await callback_query.answer("Sitio no encontrado", show_alert=True)
+            return
+        
+        stats = await Database.get_website_stats(site_id)
+        
+        status_emoji = '🟢' if website['status'] == 'up' else '🔴'
+        enabled_emoji = '✅ Activo' if website['enabled'] else '⏸️ Pausado'
+        
+        text = (
+            f"🔍 **Información del Sitio**\n\n"
+            f"**Nombre:** {website['name']}\n"
+            f"**URL:** {website['url']}\n"
+            f"**Estado:** {status_emoji} {website['status'].upper()}\n"
+            f"**Monitoreo:** {enabled_emoji}\n"
+            f"**Intervalo:** {website['interval']} segundos\n"
+            f"**ID:** `{site_id}`\n\n"
+        )
+        
+        if stats:
+            text += (
+                f"📊 **Estadísticas (24h):**\n"
+                f"• Uptime: {stats['uptime_24h']}%\n"
+                f"• Checks: {stats['total_checks']}\n"
+                f"• Respuesta: {stats['avg_response_time']}s\n"
+            )
+        
+        if website['last_check']:
+            last_check = datetime.datetime.fromisoformat(website['last_check'])
+            text += f"\n🕐 **Última verificación:** {last_check.strftime('%H:%M:%S')}"
+        
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⏸️ Pausar", callback_data=f"pause_{site_id}") 
+                if website['enabled'] else 
+                InlineKeyboardButton("▶️ Reanudar", callback_data=f"resume_{site_id}"),
+                InlineKeyboardButton("🗑️ Eliminar", callback_data=f"delete_{site_id}")
+            ],
+            [InlineKeyboardButton("📈 Historial", callback_data=f"history_{site_id}"),
+             InlineKeyboardButton("🔙 Volver", callback_data="list_sites")]
+        ])
+        
+        await callback_query.message.edit_text(text, reply_markup=keyboard)
+        await callback_query.answer()
+    
+    elif data.startswith("pause_"):
+        site_id = int(data.split("_")[1])
+        await Database.toggle_website(site_id, False)
+        await stop_monitoring_website(site_id)
+        await callback_query.answer("✅ Monitoreo pausado")
+        await callback_query.message.reply_text(f"⏸️ Monitoreo pausado para el sitio ID: {site_id}")
+    
+    elif data.startswith("resume_"):
+        site_id = int(data.split("_")[1])
+        await Database.toggle_website(site_id, True)
+        await start_monitoring_website(site_id)
+        await callback_query.answer("✅ Monitoreo reanudado")
+        await callback_query.message.reply_text(f"▶️ Monitoreo reanudado para el sitio ID: {site_id}")
+    
+    elif data.startswith("delete_"):
+        site_id = int(data.split("_")[1])
+        await Database.delete_website(site_id)
+        await stop_monitoring_website(site_id)
+        await callback_query.answer("✅ Sitio eliminado")
+        await callback_query.message.reply_text(f"🗑️ Sitio eliminado ID: {site_id}")
+    
+    elif data == "stats":
+        websites = await Database.get_websites(user_id)
+        
+        if not websites:
+            await callback_query.message.edit_text(
+                "📭 **No tienes sitios monitoreados**\n\n"
+                "Agrega sitios para ver estadísticas."
+            )
+            return
+        
+        total_sites = len(websites)
+        up_sites = len([s for s in websites if s['status'] == 'up'])
+        down_sites = len([s for s in websites if s['status'] == 'down'])
+        
+        text = (
+            f"📈 **Tus Estadísticas**\n\n"
+            f"**Sitios Totales:** {total_sites}\n"
+            f"**🟢 Online:** {up_sites}\n"
+            f"**🔴 Offline:** {down_sites}\n"
+            f"**📊 Uptime:** {(up_sites/total_sites*100 if total_sites > 0 else 0):.1f}%\n\n"
+        )
+        
+        # Estadísticas detalladas
+        for site in websites[:5]:  # Mostrar primeros 5
+            stats = await Database.get_website_stats(site['id'])
+            if stats:
+                text += f"**{site['name']}:** {stats['uptime_24h']}% uptime\n"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Actualizar", callback_data="stats"),
+             InlineKeyboardButton("📊 Detalles", callback_data="list_sites")],
+            [InlineKeyboardButton("🔙 Inicio", callback_data="start")]
+        ])
+        
+        await callback_query.message.edit_text(text, reply_markup=keyboard)
+        await callback_query.answer()
+    
+    elif data == "settings":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔔 Notificaciones", callback_data="notifications"),
+             InlineKeyboardButton("⏱️ Intervalos", callback_data="intervals")],
+            [InlineKeyboardButton("📧 Contacto", callback_data="contact"),
+             InlineKeyboardButton("🔙 Volver", callback_data="start")]
+        ])
+        
+        await callback_query.message.edit_text(
+            "⚙️ **Configuración**\n\n"
+            "Configura las opciones del bot:",
+            reply_markup=keyboard
+        )
+        await callback_query.answer()
+    
+    elif data == "start":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Agregar Sitio", callback_data="add_site"),
+             InlineKeyboardButton("📊 Mis Sitios", callback_data="list_sites")],
+            [InlineKeyboardButton("⚙️ Configuración", callback_data="settings"),
+             InlineKeyboardButton("📈 Estadísticas", callback_data="stats")]
+        ])
+        
+        await callback_query.message.edit_text(
+            "🤖 **Bot de Monitoreo Web**\n\n"
+            "Selecciona una opción:",
+            reply_markup=keyboard
+        )
+        await callback_query.answer()
 
-# Manejar nuevos miembros
-@app.on_message(filters.new_chat_members)
-def welcome_new_members(client, message):
-    for user in message.new_chat_members:
-        if user.is_self:
-            message.reply("🤖 ¡Gracias por añadirme al grupo! Usa /help para ver mis comandos.")
-        else:
-            message.reply(f"👋 ¡Bienvenido/a {user.first_name} al grupo!")
+# Funciones de monitoreo
+async def start_monitoring_website(website_id: int):
+    """Iniciar monitoreo para un sitio web específico"""
+    website = await Database.get_website(website_id)
+    if not website or website['enabled'] != 1:
+        return
+    
+    async def monitor_job():
+        while True:
+            try:
+                result = await monitor.check_website(website)
+                now = datetime.datetime.now()
+                
+                await Database.update_website_status(
+                    website_id, 
+                    result['status'], 
+                    now
+                )
+                
+                await Database.add_check_history(
+                    website_id,
+                    result['status_code'],
+                    result['response_time'],
+                    result['is_up'],
+                    result['error_message']
+                )
+                
+                # Notificar cambio de estado
+                current_status = website.get('status', 'unknown')
+                if current_status != result['status']:
+                    await monitor.send_status_notification(website, result)
+                
+                # Actualizar estado en cache
+                website['status'] = result['status']
+                
+            except Exception as e:
+                logger.error(f"Error in monitoring job for {website_id}: {e}")
+            
+            await asyncio.sleep(website['interval'])
+    
+    task = asyncio.create_task(monitor_job())
+    MONITORING_TASKS[website_id] = task
+    logger.info(f"Started monitoring for website {website_id}")
 
-# Iniciar el bot y la tarea automática
-@app.on_message(filters.command("init"))
-def init_bot(client, message):
-    if message.from_user.id == YOUR_USER_ID:
-        message.reply("🤖 **Bot inicializado**\n✅ Mensajes automáticos activados")
-        print("Bot iniciado con mensajes automáticos")
+async def stop_monitoring_website(website_id: int):
+    """Detener monitoreo para un sitio web"""
+    if website_id in MONITORING_TASKS:
+        MONITORING_TASKS[website_id].cancel()
+        del MONITORING_TASKS[website_id]
+        logger.info(f"Stopped monitoring for website {website_id}")
 
-# Ejecutar cuando el bot se inicia
-@app.on_raw_update()
-async def on_start(client, update):
-    # Solo ejecutar una vez cuando el bot inicia
-    if not hasattr(on_start, "started"):
-        on_start.started = True
-        print("👾 Bot Online 👾")
-        # Iniciar la tarea de mensajes automáticos
-        asyncio.create_task(send_auto_messages())
+async def start_all_monitoring():
+    """Iniciar monitoreo para todos los sitios activos"""
+    websites = await Database.get_websites()
+    for website in websites:
+        if website['enabled'] == 1:
+            await start_monitoring_website(website['id'])
 
-print('👾 Iniciando Bot... 👾')
-app.run()
+async def periodic_summary():
+    """Enviar resumen periódico a los usuarios"""
+    while True:
+        try:
+            # Enviar resumen cada 24 horas
+            await asyncio.sleep(24 * 60 * 60)
+            
+            # Aquí puedes agregar lógica para enviar resúmenes
+            # a los usuarios sobre el estado de sus sitios
+            
+            logger.info("Periodic summary check completed")
+            
+        except Exception as e:
+            logger.error(f"Error in periodic summary: {e}")
+
+# Inicialización
+async def main():
+    """Función principal"""
+    # Inicializar base de datos
+    await Database.init_db()
+    
+    # Iniciar monitoreo para sitios existentes
+    await start_all_monitoring()
+    
+    # Iniciar resúmenes periódicos
+    asyncio.create_task(periodic_summary())
+    
+    logger.info("🤖 Bot de Monitoreo Web iniciado!")
+    
+    # Ejecutar el bot
+    await app.start()
+    logger.info("✅ Bot conectado a Telegram")
+    
+    # Mantener el bot corriendo
+    await asyncio.Event().wait()
+
+# Ejecutar
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot detenido por el usuario")
+    except Exception as e:
+        logger.error(f"Error fatal: {e}")
