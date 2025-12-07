@@ -17,10 +17,10 @@ frozenlist
 aiosignal
 attrs
 charset-normalizer
-psutil==5.9.6
-humanize==4.8.0
-colorlog==6.8.0
-typing-extensions==4.8.0
+psutil
+humanize
+colorlog
+typing-extensions
 
 
 
