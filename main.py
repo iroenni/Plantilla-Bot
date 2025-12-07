@@ -42,7 +42,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN") or "8138537409:AAGMLe6R1nk8wHmfE2AZVSdG4_AQ8a
 DEFAULT_ADMIN_ID = 7970466590
 
 # Obtener ADMINS de variables de entorno o usar el valor por defecto
-ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "7970466590")
 if ADMIN_IDS_STR:
     try:
         ADMINS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()]
