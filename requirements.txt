@@ -6,6 +6,10 @@ psutil
 aiosqlite
 aiohttp
 pytz
+aiofiles
+beautifulsoup4
+lxml
+patool
 
 
 
