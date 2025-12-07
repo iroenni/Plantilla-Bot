@@ -38,7 +38,7 @@ API_HASH = os.getenv("API_HASH") or "a86730aab5c59953c424abb4396d32d5"
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "8138537409:AAGMLe6R1nk8wHmfE2AZVSdG4_AQ8aaISSA"
 
 # Lista de administradores (IDs de usuario de Telegram)
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "7970466590").split(",") if x]
 # O puedes usar el ID de tu usuario (obténlo con @userinfobot en Telegram)
 DEFAULT_ADMIN_ID = 7970466590  # ⚠️ Cambia esto por tu ID real
 
