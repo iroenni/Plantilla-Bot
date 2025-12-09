@@ -2,6 +2,7 @@ import os
 import asyncio
 import shutil
 import tempfile
+import sys  # ✅ AÑADIDO
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import aiohttp
@@ -29,30 +30,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==============================================
-# ⚠️⚠️⚠️ ADVERTENCIA DE SEGURIDAD ⚠️⚠️⚠️
+# ⚠️⚠️⚠️ CONFIGURACIÓN PRINCIPAL ⚠️⚠️⚠️
 # ==============================================
 
-# Configuración del bot (DEBES USAR VARIABLES DE ENTORNO)
+# Configuración del bot (USA VARIABLES DE ENTORNO)
 API_ID = os.getenv("API_ID") or 14681595
 API_HASH = os.getenv("API_HASH") or "a86730aab5c59953c424abb4396d32d5"
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "8138537409:AAGMLe6R1nk8wHmfE2AZVSdG4_AQ8aaISSA"
 
-# CORRECCIÓN: Definir ADMINS correctamente
-# Tu ID de administrador
-DEFAULT_ADMIN_ID = 7970466590
+# ✅ TU ID DE ADMINISTRADOR EXCLUSIVO
+ADMIN_ID = 7970466590  # Tu ID exclusivo
+ADMINS = [ADMIN_ID]  # Solo tú eres administrador
 
-# Obtener ADMINS de variables de entorno o usar el valor por defecto
-ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "7970466590")
-if ADMIN_IDS_STR:
-    try:
-        ADMINS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()]
-    except ValueError:
-        logger.warning("⚠️ Error al procesar ADMIN_IDS. Usando valor por defecto.")
-        ADMINS = [DEFAULT_ADMIN_ID]
-else:
-    ADMINS = [DEFAULT_ADMIN_ID]
-
-logger.info(f"✅ Administradores configurados: {ADMINS}")
+logger.info(f"✅ Administrador exclusivo configurado: {ADMIN_ID}")
 
 # Verificar credenciales
 if not all([API_ID, API_HASH, BOT_TOKEN]):
@@ -76,6 +66,11 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Almacenamiento temporal para resultados de búsqueda
 search_cache: Dict[str, Dict[str, Any]] = {}
 
+# ✅ VARIABLES GLOBALES PARA ESTADOS
+rename_states = {}
+mkdir_states = {}
+search_states = {}
+
 # Configuración
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB en bytes
 SEARCH_CACHE_TIMEOUT = 1800  # 30 minutos en segundos
@@ -87,10 +82,10 @@ def admin_only(func):
     async def wrapper(client, message, *args, **kwargs):
         user_id = message.from_user.id if message.from_user else None
 
-        if user_id not in ADMINS:
+        if user_id != ADMIN_ID:  # ✅ Solo tu ID
             await message.reply_text(
                 "❌ **Acceso denegado**\n\n"
-                "Esta función solo está disponible para administradores del bot.",
+                "Esta función solo está disponible para el administrador del bot.",
                 parse_mode=enums.ParseMode.MARKDOWN
             )
             return
@@ -830,10 +825,11 @@ async def info_command(client: Client, message: Message):
     info_text = f"""
 🤖 **GitHub Downloader Bot v2.0**
 
-**Desarrollador:** [Tu Nombre]
+**Desarrollador:** Administrador Exclusivo
 **Username:** @{client.me.username}
 **ID:** {client.me.id}
 **Versión:** 2.0
+**Admin ID:** {ADMIN_ID}
 
 **✨ Características:**
 • 🔍 Sistema de búsqueda de repositorios
@@ -841,6 +837,7 @@ async def info_command(client: Client, message: Message):
 • 📊 Estadísticas en tiempo real
 • 🔄 Navegación por páginas
 • 📋 Vista detallada de repos
+• 🛠️ Panel de administración exclusivo
 
 **🛠️ Tecnologías:**
 • Pyrogram para Telegram
@@ -894,37 +891,34 @@ async def handle_github_url(client: Client, message: Message):
         )
 
 # ==============================================
-# COMANDOS DE ADMINISTRACIÓN (ROOT)
+# COMANDOS DE ADMINISTRACIÓN (ROOT) - SOLO TU
 # ==============================================
 
 @app.on_message(filters.command("root") & filters.private)
 @admin_only
 async def root_command(client: Client, message: Message):
-    """Menú principal de administración"""
+    """Menú principal de administración - Solo para ti"""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📁 Ver directorio actual", callback_data="root_list_current")],
         [InlineKeyboardButton("🔍 Buscar archivos", callback_data="root_search_menu"),
          InlineKeyboardButton("📊 Uso de disco", callback_data="root_disk_usage")],
         [InlineKeyboardButton("🧹 Limpiar temp", callback_data="root_cleanup_temp"),
          InlineKeyboardButton("📝 Ver logs", callback_data="root_view_logs")],
-        [InlineKeyboardButton("🔄 Reiniciar bot", callback_data="root_restart_bot"),
-         InlineKeyboardButton("🚫 Cerrar bot", callback_data="root_shutdown_bot")],
         [InlineKeyboardButton("🏠 Inicio", callback_data="start")]
     ])
 
     await message.reply_text(
-        "🔧 **Panel de Administración Root**\n\n"
+        "🔧 **Panel de Administración Root - EXCLUSIVO**\n\n"
         "**Opciones disponibles:**\n"
         "• 📁 **Explorar directorios** - Navegar por el sistema de archivos\n"
         "• 🔍 **Buscar archivos** - Buscar archivos por nombre\n"
         "• 📊 **Uso de disco** - Ver espacio disponible y utilizado\n"
         "• 🧹 **Limpiar temporal** - Eliminar archivos temporales\n"
-        "• 📝 **Ver logs** - Consultar registros del bot\n"
-        "• 🔄 **Reiniciar bot** - Reiniciar la aplicación\n"
-        "• 🚫 **Cerrar bot** - Apagar el bot\n\n"
+        "• 📝 **Ver logs** - Consultar registros del bot\n\n"
         f"**Directorio base:** `{BASE_DIR}`\n"
         f"**Directorio temp:** `{TEMP_DIR}`\n"
-        f"**Administradores:** {len(ADMINS)} usuario(s)",
+        f"**Admin ID:** {ADMIN_ID}\n"
+        f"**Estado:** 🔐 **ACCESO EXCLUSIVO**",
         reply_markup=keyboard,
         parse_mode=enums.ParseMode.MARKDOWN
     )
@@ -932,7 +926,7 @@ async def root_command(client: Client, message: Message):
 @app.on_message(filters.command("ls") & filters.private)
 @admin_only
 async def ls_command(client: Client, message: Message):
-    """Listar contenido de directorio"""
+    """Listar contenido de directorio - Solo para ti"""
     args = message.text.split(maxsplit=1)
 
     if len(args) > 1:
@@ -1061,7 +1055,7 @@ async def list_directory_command(client: Client, message: Message, path: str, pa
 @app.on_message(filters.command("disk") & filters.private)
 @admin_only
 async def disk_command(client: Client, message: Message):
-    """Mostrar uso del disco"""
+    """Mostrar uso del disco - Solo para ti"""
     disk_info = FileManager.get_disk_usage()
 
     if not disk_info:
@@ -1096,7 +1090,7 @@ async def disk_command(client: Client, message: Message):
 @app.on_message(filters.command("clean") & filters.private)
 @admin_only
 async def clean_command(client: Client, message: Message):
-    """Limpiar archivos temporales"""
+    """Limpiar archivos temporales - Solo para ti"""
     try:
         if os.path.exists(TEMP_DIR):
             # Contar archivos antes de limpiar
@@ -1128,7 +1122,7 @@ async def clean_command(client: Client, message: Message):
 @app.on_message(filters.command("find") & filters.private)
 @admin_only
 async def find_command(client: Client, message: Message):
-    """Buscar archivos"""
+    """Buscar archivos - Solo para ti"""
     args = message.text.split(maxsplit=2)
 
     if len(args) < 2:
@@ -1206,7 +1200,7 @@ async def find_command(client: Client, message: Message):
 @app.on_message(filters.command("tree") & filters.private)
 @admin_only
 async def tree_command(client: Client, message: Message):
-    """Mostrar estructura de directorios en formato árbol"""
+    """Mostrar estructura de directorios en formato árbol - Solo para ti"""
     args = message.text.split(maxsplit=1)
     path = args[1] if len(args) > 1 else BASE_DIR
     depth = 3  # Profundidad máxima por defecto
@@ -1276,7 +1270,7 @@ async def tree_command(client: Client, message: Message):
 @app.on_message(filters.command("stats") & filters.private)
 @admin_only
 async def stats_command(client: Client, message: Message):
-    """Estadísticas del bot y sistema"""
+    """Estadísticas del bot y sistema - Solo para ti"""
     # Obtener información del sistema
     disk_info = FileManager.get_disk_usage()
 
@@ -1306,12 +1300,12 @@ async def stats_command(client: Client, message: Message):
         mem_rss = "No disponible"
         mem_vms = "No disponible"
 
-    text = "📊 **Estadísticas del Sistema**\n\n"
+    text = "📊 **Estadísticas del Sistema - EXCLUSIVO**\n\n"
 
     text += "🤖 **Información del Bot:**\n"
     text += f"• **Nombre:** @{bot_info.username}\n"
     text += f"• **ID:** {bot_info.id}\n"
-    text += f"• **Administradores:** {len(ADMINS)}\n"
+    text += f"• **Admin ID:** {ADMIN_ID}\n"
     text += f"• **Caché de búsqueda:** {cache_size} entradas\n\n"
 
     text += "💾 **Uso de Disco:**\n"
@@ -1340,6 +1334,79 @@ async def stats_command(client: Client, message: Message):
     ])
 
     await message.reply_text(text, reply_markup=keyboard, parse_mode=enums.ParseMode.MARKDOWN)
+
+# ==============================================
+# HANDLER PARA MENSAJES DE TEXTO (RENOMBRAR/CREAR)
+# ==============================================
+
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "search", "download", "help", "example", "info", "root", "ls", "disk", "clean", "find", "tree", "stats"]))
+async def handle_text_messages(client: Client, message: Message):
+    """Maneja mensajes de texto para operaciones root - Solo para ti"""
+    user_id = message.from_user.id
+
+    if user_id != ADMIN_ID:  # ✅ Solo tú
+        return
+
+    text = message.text.strip()
+
+    # Verificar si estamos esperando un nombre para renombrar
+    if user_id in rename_states:
+        old_path = rename_states[user_id]
+        parent_dir = os.path.dirname(old_path)
+        new_path = os.path.join(parent_dir, text)
+
+        success, msg = FileManager.rename_path(old_path, text)
+
+        if success:
+            await message.reply_text(f"✅ {msg}")
+            await list_directory_command(client, message, parent_dir)
+        else:
+            await message.reply_text(f"❌ {msg}")
+
+        del rename_states[user_id]
+        return
+
+    # Verificar si estamos esperando un nombre para nueva carpeta
+    elif user_id in mkdir_states:
+        parent_path = mkdir_states[user_id]
+        new_dir = os.path.join(parent_path, text)
+
+        success, msg = FileManager.create_directory(new_dir)
+
+        if success:
+            await message.reply_text(f"✅ {msg}")
+            await list_directory_command(client, message, parent_path)
+        else:
+            await message.reply_text(f"❌ {msg}")
+
+        del mkdir_states[user_id]
+        return
+
+    # Verificar si estamos esperando un patrón de búsqueda
+    elif user_id in search_states:
+        search_path = search_states[user_id]
+
+        # Realizar búsqueda
+        results = FileManager.search_files(search_path, text)
+
+        if not results:
+            await message.reply_text(f"❌ No se encontraron resultados para `{text}`")
+        else:
+            response = f"🔍 **Resultados para `{text}` en `{search_path}`**\n\n"
+            response += f"**Encontrados:** {len(results)} items\n\n"
+
+            for i, result in enumerate(results[:10], 1):
+                icon = "📁" if result["type"] == "directory" else "📄"
+                size = f" ({result['size_human']})" if result["type"] == "file" else ""
+                response += f"{icon} **{i}.** `{result['relative_path']}`{size}\n"
+
+            if len(results) > 10:
+                response += f"\n... y {len(results) - 10} más"
+
+            await message.reply_text(response, parse_mode=enums.ParseMode.MARKDOWN)
+
+        del search_states[user_id]
+        return
 
 # ==============================================
 # HANDLERS DE CALLBACKS (TODOS LOS CALLBACKS)
@@ -1611,12 +1678,12 @@ async def handle_all_callbacks(client: Client, callback_query: CallbackQuery):
             await callback_query.answer()
 
         # ==============================================
-        # CALLBACKS PARA ADMINISTRACIÓN ROOT
+        # CALLBACKS PARA ADMINISTRACIÓN ROOT - SOLO TU
         # ==============================================
 
         elif data.startswith("root_"):
-            if user_id not in ADMINS:
-                await callback_query.answer("❌ Acceso denegado", show_alert=True)
+            if user_id != ADMIN_ID:  # ✅ Solo tú
+                await callback_query.answer("❌ Acceso exclusivo del administrador", show_alert=True)
                 return
 
             if data == "root":
@@ -1724,6 +1791,7 @@ async def handle_all_callbacks(client: Client, callback_query: CallbackQuery):
                     confirm_text += "**Esta acción no se puede deshacer.**"
 
                 await message.edit_text(confirm_text, reply_markup=keyboard, parse_mode=enums.ParseMode.MARKDOWN)
+                await callback_query.answer()
 
             elif data.startswith("root_confirm_delete_"):
                 path = data[20:]
@@ -1737,6 +1805,82 @@ async def handle_all_callbacks(client: Client, callback_query: CallbackQuery):
                 else:
                     await message.edit_text(f"❌ {message_text}")
                     await callback_query.answer("❌ Error")
+
+            elif data.startswith("root_rename_"):
+                path = data[12:]
+
+                if not FileManager.is_safe_path(path):
+                    await callback_query.answer("❌ Ruta no permitida", show_alert=True)
+                    return
+
+                if not os.path.exists(path):
+                    await callback_query.answer("❌ La ruta no existe", show_alert=True)
+                    return
+
+                item_name = os.path.basename(path)
+
+                # Guardar la ruta en el estado del usuario
+                rename_states[user_id] = path
+                
+                await callback_query.answer("📝 Ingresa el nuevo nombre")
+                
+                await message.reply_text(
+                    f"🔄 **Renombrar**\n\n"
+                    f"**Actual:** `{item_name}`\n\n"
+                    f"Por favor, envía el nuevo nombre:",
+                    parse_mode=enums.ParseMode.MARKDOWN
+                )
+
+            elif data.startswith("root_mkdir_"):
+                parent_path = data[11:]
+
+                if not FileManager.is_safe_path(parent_path):
+                    await callback_query.answer("❌ Ruta no permitida", show_alert=True)
+                    return
+
+                mkdir_states[user_id] = parent_path
+                await callback_query.answer("📁 Ingresa el nombre de la carpeta")
+                
+                await message.reply_text(
+                    f"➕ **Crear nueva carpeta**\n\n"
+                    f"**Ubicación:** `{parent_path}`\n\n"
+                    f"Por favor, envía el nombre de la nueva carpeta:",
+                    parse_mode=enums.ParseMode.MARKDOWN
+                )
+
+            elif data == "root_search_menu":
+                await message.edit_text(
+                    "🔍 **Buscar Archivos**\n\n"
+                    "Envía el patrón de búsqueda:\n\n"
+                    "**Ejemplos:**\n"
+                    "• `.py` - Archivos Python\n"
+                    "• `config` - Archivos de configuración\n"
+                    "• `log` - Archivos de log\n\n"
+                    "**O usa:** `/find <patrón> [ruta]`",
+                    parse_mode=enums.ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔍 Buscar en base", callback_data=f"root_search_{BASE_DIR}"),
+                         InlineKeyboardButton("🔍 Buscar en temp", callback_data=f"root_search_{TEMP_DIR}")],
+                        [InlineKeyboardButton("🔙 Volver", callback_data="root")]
+                    ])
+                )
+
+            elif data.startswith("root_search_"):
+                path = data[12:]
+
+                if not FileManager.is_safe_path(path):
+                    await callback_query.answer("❌ Ruta no permitida", show_alert=True)
+                    return
+
+                search_states[user_id] = path
+                await callback_query.answer("🔍 Ingresa el patrón de búsqueda")
+                
+                await message.reply_text(
+                    f"🔍 **Buscar en directorio**\n\n"
+                    f"**Ruta:** `{path}`\n\n"
+                    f"Envía el patrón a buscar:",
+                    parse_mode=enums.ParseMode.MARKDOWN
+                )
 
             elif data == "root_view_logs":
                 log_file = os.path.join(BASE_DIR, "bot.log")
@@ -1821,43 +1965,6 @@ async def handle_all_callbacks(client: Client, callback_query: CallbackQuery):
                 else:
                     await message.edit_text("📭 No se encontró archivo de log")
 
-            elif data == "root_restart_bot":
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Sí, reiniciar", callback_data="root_confirm_restart"),
-                     InlineKeyboardButton("❌ Cancelar", callback_data="root")]
-                ])
-
-                await message.edit_text(
-                    "⚠️ **Confirmar reinicio**\n\n"
-                    "¿Estás seguro de que quieres reiniciar el bot?\n\n"
-                    "**Nota:** Esto puede tomar unos segundos.",
-                    reply_markup=keyboard
-                )
-
-            elif data == "root_confirm_restart":
-                await message.edit_text("🔄 Reiniciando bot...")
-                import sys
-                os.execv(sys.executable, ['python'] + sys.argv)
-
-            elif data == "root_shutdown_bot":
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Sí, cerrar", callback_data="root_confirm_shutdown"),
-                     InlineKeyboardButton("❌ Cancelar", callback_data="root")]
-                ])
-
-                await message.edit_text(
-                    "⚠️ **Confirmar cierre**\n\n"
-                    "¿Estás seguro de que quieres cerrar el bot?\n\n"
-                    "**Nota:** Tendrás que reiniciarlo manualmente.",
-                    reply_markup=keyboard
-                )
-
-            elif data == "root_confirm_shutdown":
-                await message.edit_text("🛑 Cerrando bot...")
-                await client.stop()
-                import sys
-                sys.exit(0)
-
     except Exception as e:
         logger.error(f"Error en callback: {e}")
         await callback_query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
@@ -1868,29 +1975,36 @@ async def handle_all_callbacks(client: Client, callback_query: CallbackQuery):
 
 async def main():
     try:
-        logger.info("🚀 Iniciando GitHub Downloader Bot con funciones Root...")
-        
+        logger.info("🚀 Iniciando GitHub Downloader Bot con funciones Root EXCLUSIVAS...")
+
         # Crear directorios necesarios
         os.makedirs(TEMP_DIR, exist_ok=True)
         logs_dir = os.path.join(BASE_DIR, "logs")
         os.makedirs(logs_dir, exist_ok=True)
-        
+
+        # Crear archivo de log si no existe
+        log_file = os.path.join(BASE_DIR, "bot.log")
+        if not os.path.exists(log_file):
+            with open(log_file, 'w') as f:
+                f.write(f"=== Bot iniciado el {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                f.write(f"=== Admin ID: {ADMIN_ID} ===\n")
+
         # Configurar mimetypes
         mimetypes.init()
-        
+
         # Iniciar el bot
         await app.start()
-        
+
         # Obtener información del bot
         me = await app.get_me()
         logger.info(f"✅ Bot iniciado como: @{me.username}")
         logger.info(f"✅ ID del bot: {me.id}")
-        logger.info(f"✅ Administradores: {ADMINS}")
-        
+        logger.info(f"✅ Administrador EXCLUSIVO: {ADMIN_ID}")
+
         # Mantener el bot en ejecución
         logger.info("✅ Bot en ejecución. Presiona Ctrl+C para detener.")
         await asyncio.Event().wait()
-        
+
     except KeyboardInterrupt:
         logger.info("🛑 Bot detenido por el usuario")
     except Exception as e:
@@ -1910,7 +2024,7 @@ if __name__ == "__main__":
         import subprocess
         subprocess.run([sys.executable, "-m", "pip", "install", "psutil"])
         import psutil
-    
+
     try:
         import humanize
     except ImportError:
@@ -1918,6 +2032,6 @@ if __name__ == "__main__":
         import subprocess
         subprocess.run([sys.executable, "-m", "pip", "install", "humanize"])
         import humanize
-    
+
     # Ejecutar el bot
     app.run()
